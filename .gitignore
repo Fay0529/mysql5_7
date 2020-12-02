@@ -1,3 +1,4 @@
+.vscode
 # Prerequisites
 *.d
 
@@ -33,6 +34,10 @@
 
 .idea
 cmake-build-debug
+
+.clion.source.upload.marker
+CMakeCache.txt
+MySQL.cbp
 
 CMakeFiles/
 CPackConfig.cmake
