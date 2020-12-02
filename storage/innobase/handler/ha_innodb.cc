@@ -299,7 +299,7 @@ static TYPELIB innodb_default_row_format_typelib = {
 	innodb_default_row_format_names,
 	NULL
 };
-
+//xfcomment:  innodb_lock_schedule_algorithm_names
 /** Possible values of the parameter innodb_lock_schedule_algorithm */
 static const char* innodb_lock_schedule_algorithm_names[] = {
 	"fcfs",
@@ -307,6 +307,7 @@ static const char* innodb_lock_schedule_algorithm_names[] = {
 	NullS
 };
 
+//xfcomment:  innodb_lock_schedule_algorithm_typelib
 /** Used to define an enumerate type of the system variable
 innodb_lock_schedule_algorithm. */
 static TYPELIB innodb_lock_schedule_algorithm_typelib = {
@@ -19544,6 +19545,7 @@ static MYSQL_SYSVAR_ULONG(doublewrite_batch_size, srv_doublewrite_batch_size,
   NULL, NULL, 120, 1, 127, 0);
 #endif /* defined UNIV_DEBUG || defined UNIV_PERF_DEBUG */
 
+// xfcomment: MYSQL_SYSVAR_ENUM(lock_schedule_algorithm, innodb_lock_schedule_algorithm,
 static MYSQL_SYSVAR_ENUM(lock_schedule_algorithm, innodb_lock_schedule_algorithm,
   PLUGIN_VAR_RQCMDARG,
   "The algorithm Innodb uses for deciding which locks to grant next when"
@@ -20160,7 +20162,7 @@ static struct st_mysql_sys_var* innobase_system_variables[]= {
   MYSQL_SYSVAR(ft_sort_pll_degree),
   MYSQL_SYSVAR(large_prefix),
   MYSQL_SYSVAR(force_load_corrupted),
-  MYSQL_SYSVAR(lock_schedule_algorithm),
+  MYSQL_SYSVAR(lock_schedule_algorithm), //xfcomment: MYSQL_SYSVAR(lock_schedule_algorithm)
   MYSQL_SYSVAR(locks_unsafe_for_binlog),
   MYSQL_SYSVAR(lock_wait_timeout),
   MYSQL_SYSVAR(deadlock_detect),

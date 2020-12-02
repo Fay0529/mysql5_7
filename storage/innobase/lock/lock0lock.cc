@@ -56,6 +56,8 @@ Created 5/7/1996 Heikki Tuuri
 /* Flag to enable/disable deadlock detector. */
 my_bool	innobase_deadlock_detect = TRUE;
 
+// xfcomment: set innodb_lock_schedule_algorithm = INNODB_LOCK_SCHEDULE_ALGORITHM_FCFS, can set to INNODB_LOCK_SCHEDULE_ALGORITHM_VATS
+
 /** Lock scheduling algorithm */
 ulong innodb_lock_schedule_algorithm = INNODB_LOCK_SCHEDULE_ALGORITHM_FCFS;
 
@@ -1493,6 +1495,8 @@ RecLock::lock_alloc(
 	return(lock);
 }
 
+// xfcomment : static bool has_higher_priority(lock_t *lock1, lock_t *lock2)
+
 /*********************************************************************//**
 Check if lock1 has higher priority than lock2.
 NULL has lowest priority.
@@ -1532,6 +1536,8 @@ has_higher_priority(
 	return lock1->trx->dep_size > lock2->trx->dep_size;
 }
 
+// xfcomment : static bool use_vats(trx_t *trx)
+
 static
 bool
 use_vats(
@@ -1541,6 +1547,8 @@ use_vats(
 		   INNODB_LOCK_SCHEDULE_ALGORITHM_VATS
 		&& !thd_is_replication_slave_thread(trx->mysql_thd);
 }
+
+// xfcomment : static lock_t * lock_rec_get_first( hash_table_t *hash, ulint   space, ulint   page_no, ulint   heap_no)
 
 static
 lock_t *
@@ -1560,6 +1568,8 @@ lock_rec_get_first(
 	return lock;
 }
 
+// xfcomment : static void lock_rec_insert_to_head( hash_table_t *lock_hash, lock_t *lock, ulint   rec_fold)
+
 static
 void
 lock_rec_insert_to_head(
@@ -1578,6 +1588,8 @@ lock_rec_insert_to_head(
 		lock->hash = next;
 	}
 }
+
+// xfcomment: static void update_dep_size(trx_t  *trx, long    size_delta, std::set<trx_t *> &updated_trx, long    depth=1)
 
 static
 void

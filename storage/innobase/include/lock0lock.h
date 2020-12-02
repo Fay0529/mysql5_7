@@ -45,6 +45,8 @@ class ReadView;
 
 extern my_bool	innobase_deadlock_detect;
 
+// xfcomment: enum innodb_lock_schedule_algorithm_t
+
 /** Alternatives for innodb_lock_schedule_algorithm, which can be changed by
  setting innodb_lock_schedule_algorithm. */
 enum innodb_lock_schedule_algorithm_t {
