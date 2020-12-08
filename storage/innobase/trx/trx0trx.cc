@@ -1462,6 +1462,7 @@ trx_start_low(
 		trx->start_time = ut_time();
 	}
 
+	// xfcomment: trx_start_low 初始化 trx的dep_size、size_updated、seq
 	trx->dep_size = 0;
 	trx->size_updated = false;
 	trx->seq = 0;

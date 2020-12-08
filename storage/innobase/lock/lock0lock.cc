@@ -56,7 +56,7 @@ Created 5/7/1996 Heikki Tuuri
 /* Flag to enable/disable deadlock detector. */
 my_bool	innobase_deadlock_detect = TRUE;
 
-// xfcomment: set innodb_lock_schedule_algorithm = INNODB_LOCK_SCHEDULE_ALGORITHM_FCFS, can set to INNODB_LOCK_SCHEDULE_ALGORITHM_VATS
+// xfcomment: 设置默认的调度算法,可以设置为 INNODB_LOCK_SCHEDULE_ALGORITHM_VATS
 
 /** Lock scheduling algorithm */
 ulong innodb_lock_schedule_algorithm = INNODB_LOCK_SCHEDULE_ALGORITHM_FCFS;
@@ -1495,7 +1495,7 @@ RecLock::lock_alloc(
 	return(lock);
 }
 
-// xfcomment : static bool has_higher_priority(lock_t *lock1, lock_t *lock2)
+// xfcomment : has_higher_priority(*lock1, *lock2)
 
 /*********************************************************************//**
 Check if lock1 has higher priority than lock2.
@@ -1536,7 +1536,7 @@ has_higher_priority(
 	return lock1->trx->dep_size > lock2->trx->dep_size;
 }
 
-// xfcomment : static bool use_vats(trx_t *trx)
+// xfcomment : use_vats(trx_t *trx)
 
 static
 bool
@@ -1548,7 +1548,7 @@ use_vats(
 		&& !thd_is_replication_slave_thread(trx->mysql_thd);
 }
 
-// xfcomment : static lock_t * lock_rec_get_first( hash_table_t *hash, ulint   space, ulint   page_no, ulint   heap_no)
+// xfcomment : lock_rec_get_first( *hash_table, space, page_no, heap_no) 返回该记录上的第一个锁
 
 static
 lock_t *
@@ -1560,15 +1560,16 @@ lock_rec_get_first(
 {
 	lock_t *lock;
 
-	lock = lock_rec_get_first_on_page_addr(hash, space, page_no);
-	if (lock != NULL && !lock_rec_get_nth_bit(lock, heap_no)) {
-		lock = lock_rec_get_next(heap_no, lock);
+	lock = lock_rec_get_first_on_page_addr(hash, space, page_no); // 通过页地址得到通过hash表中的第一个lock_t 对象
+	if (lock != NULL && !lock_rec_get_nth_bit(lock, heap_no)) { // 如果锁不为空或者当前锁对象不包含想要的记录
+		lock = lock_rec_get_next(heap_no, lock); // 得到下一个拥有heap_no 记录的锁对象
 	}
 
 	return lock;
 }
 
-// xfcomment : static void lock_rec_insert_to_head( hash_table_t *lock_hash, lock_t *lock, ulint   rec_fold)
+// xfcomment : lock_rec_insert_to_head( *lock_hash, *lock, rec_fold)
+//  将锁放到hash表的第一个node
 
 static
 void
@@ -1581,7 +1582,7 @@ lock_rec_insert_to_head(
 	hash_cell_t* cell;
 
 	// Move the target lock to the head of the list
-	cell = hash_get_nth_cell(lock_hash, hash_calc_hash(rec_fold, lock_hash));
+	cell = hash_get_nth_cell(lock_hash, hash_calc_hash(rec_fold, lock_hash)); //
 	if (lock != cell->node) {
 		next = (lock_t *) cell->node;
 		cell->node = lock;
@@ -1589,7 +1590,10 @@ lock_rec_insert_to_head(
 	}
 }
 
-// xfcomment: static void update_dep_size(trx_t  *trx, long    size_delta, std::set<trx_t *> &updated_trx, long    depth=1)
+/* xfcomment: update_dep_size(trx_t  *trx, long  size_delta, std::set<trx_t *> &updated_trx, long  depth=1)
+    这个函数会递归更新 当前事务 以及 占有当前事务所等待的锁的事务 的dep_size, 均将其加上 size_delta
+    递归沿着论文图中的虚线向上传播
+    depth这个参数从到尾也没看见什么作用,给了一个缺省值, 应该是用来debug查看递归深度用的 */
 
 static
 void
@@ -1606,35 +1610,40 @@ update_dep_size(
 	lock_t *wait_lock;
 	hash_table_t *lock_hash;
 
-	if (!use_vats(trx) || trx->size_updated || size_delta == 0) {
+	if (!use_vats(trx) || trx->size_updated || size_delta == 0) { // 递归终止条件
 		return;
 	}
 
-	trx->size_updated = true;
+	trx->size_updated = true; //确保更新过的事务不会再更新
 	trx->dep_size += size_delta;
 	updated_trx.insert(trx);
 	if (trx->dep_size < 0) {
 		trx->dep_size = 0;
 	}
 	wait_lock = trx->lock.wait_lock;
-	if (trx->state != TRX_STATE_ACTIVE
+	if (trx->state != TRX_STATE_ACTIVE // 如果当前事务不是ACTIVE  或 没有等待的锁 则直接返回
 		|| wait_lock == NULL) {
 		return;
 	}
 
 	space = wait_lock->un_member.rec_lock.space;
 	page_no = wait_lock->un_member.rec_lock.page_no;
-	heap_no = lock_rec_find_set_bit(wait_lock);
+	heap_no = lock_rec_find_set_bit(wait_lock); // xfcomment：疑问？这里只会拿到第一个bit为1的索引，但是一个lock_t对象可能有多个bit被设置为1
 	lock_hash = lock_hash_get(wait_lock->type_mode);
 	for (lock = lock_rec_get_first(lock_hash, space, page_no, heap_no);
 		 lock != NULL;
-		 lock = lock_rec_get_next(heap_no, lock)) {
+		 lock = lock_rec_get_next(heap_no, lock)) { // 遍历该行记录上的所有的锁
 		if (!lock_get_wait(lock)
-			&& trx != lock->trx) {
-			update_dep_size(lock->trx, size_delta, updated_trx, depth + 1);
+			&& trx != lock->trx) { // 如果当前的锁不是处于等待状态 并且拥有这个锁的事务不是当前事务,即事务占有这个锁,对应论文图中的虚线
+			update_dep_size(lock->trx, size_delta, updated_trx, depth + 1); // 那么就递归更新持有这个锁对应的事务的dep_size
 		}
 	}
 }
+
+
+// xfcomment: update_dep_size(trx_t  *trx, long size_delta)
+//  调用上面的函数,递归更新 当前事务 以及 占有当前事务所等待的锁的事务 的dep_size, 均将其加上 size_delta
+//  并且将更新过的所有事务的size_updated改为false
 
 static
 void
@@ -1651,6 +1660,13 @@ update_dep_size(
 	}
 }
 
+/* xfcomment: update_dep_size(lock_t *in_lock, ulint heap_no, bool wait)
+    根据当前锁对应的事务是否持有该行锁,来更新依赖图的事务的dep_size
+    如果该锁需要等待(对应论文图中的实线),遍历该行记录上的所有的锁,调用上面的函数递归更新那些占有该记录锁的事务及其需要等待的事务的dep_size+=in_lock->trx->dep_size + 1
+    如果该锁不需要等待(对应论文中的虚线),即该锁对应的事务已经占有该锁,则统计所有的需要等待该锁的事务的dep_size+1的总和total_size_delta
+    然后使用上面的函数递归更新该锁对应的事务以及其等待的事务的dep_size+=total_size_delta */
+
+
 static
 void
 update_dep_size(
@@ -1664,7 +1680,7 @@ update_dep_size(
 	long    total_size_delta;
 	hash_table_t *lock_hash;
 
-	if (!use_vats(in_lock->trx)) {
+	if (!use_vats(in_lock->trx)) { // 不使用vats算法直接返回
 		return;
 	}
 
@@ -1673,6 +1689,7 @@ update_dep_size(
 	lock_hash = lock_hash_get(in_lock->type_mode);
 
 	if (wait) {
+	    // 如果该锁需要等待(对应论文图中的实线),遍历该行记录上的所有的锁,调用上面的函数递归更新那些占有该记录锁的事务及其需要等待的事务的dep_size
 		for (lock = lock_rec_get_first(lock_hash, space, page_no, heap_no);
 			 lock != NULL;
 			 lock = lock_rec_get_next(heap_no, lock)) {
@@ -1682,6 +1699,8 @@ update_dep_size(
 			}
 		}
 	} else {
+	    // 如果该锁不需要等待(对应论文中的虚线),即该锁对应的事务已经占有该锁,则统计所有的需要等待该锁的事务的dep_size+1的总和,然后使用上面的函数
+	    // 递归更新该锁对应的事务以及其等待的事务的 dep_size
 		total_size_delta = 0;
 		for (lock = lock_rec_get_first(lock_hash, space, page_no, heap_no);
 			 lock != NULL;
@@ -1695,6 +1714,8 @@ update_dep_size(
 	}
 }
 
+// xfcomment: 修改 RecLock::lock_add(lock_t* lock, bool add_to_hash), 该函数只会在锁创建的时候调用
+
 /**
 Add the lock to the record lock hash and the transaction's lock list
 @param[in,out] lock	Newly created record lock to add to the rec hash
@@ -1705,28 +1726,32 @@ RecLock::lock_add(lock_t* lock, bool add_to_hash)
 	ut_ad(lock_mutex_own());
 	ut_ad(trx_mutex_own(lock->trx));
 
-	bool wait = m_mode & LOCK_WAIT;
-
+	bool wait = m_mode & LOCK_WAIT; // xfcomment: RecLock::lock_add
 	if (add_to_hash) {
 		ulint	key = m_rec_id.fold();
-		hash_table_t *lock_hash = lock_hash_get(m_mode);
+		hash_table_t *lock_hash = lock_hash_get(m_mode); // xfcomment: RecLock::lock_add
 
 		++lock->index->table->n_rec_locks;
+		// xfcomment: - HASH_INSERT(lock_t,hash,lock_hash_get(m_mode,key,lock);
 
-		if (use_vats(lock->trx) && !wait) {
+		if (use_vats(lock->trx) && !wait) { // 如果事务使用vats并且锁不需要等待,就加入到hash表的对应第一个元素
 			lock_rec_insert_to_head(lock_hash, lock, key);
 		} else {
 			HASH_INSERT(lock_t, hash, lock_hash, key, lock);
 		}
 	}
 
-	UT_LIST_ADD_LAST(lock->trx->lock.trx_locks, lock);
+       // xfcomment: - if (m_mode & LOCK_WAIT) {
+	UT_LIST_ADD_LAST(lock->trx->lock.trx_locks, lock); // 将锁加入到trx的trx_locks链表里
 
 	if (wait) {
+	    // 如果该锁需要等待,则设置这个锁的状态为等待,并且将这个事务的wait_lock指向该锁
 		lock_set_lock_and_trx_wait(lock, lock->trx);
 	} else {
+	    // 如果该锁不需要等待,则说明锁对应的事务持有该锁,则调用上面的函数更新该锁
 		update_dep_size(lock, lock_rec_find_set_bit(lock), false);
 	}
+	// xfcomment: - UT_LIST_ADD_LAST(lock->trx->lock.trx_locks, lock);
 }
 
 /**
@@ -1949,6 +1974,7 @@ RecLock::add_to_waitq(const lock_t* wait_for, const lock_prdt_t* prdt)
 
 	ut_ad(trx_mutex_own(m_trx));
 
+    // xfcomment : update_dep_size 加入 RecLock::add_to_waitq 这个函数目前还没理解 会在lock_rec_insert_check_and_lock 和 lock_rec_lock_slow中调用
 	update_dep_size(lock, lock_rec_find_set_bit(lock), err == DB_LOCK_WAIT || err == DB_DEADLOCK);
 
 	/* m_trx->mysql_thd is NULL if it's an internal trx. So current_thd is used */
@@ -2040,6 +2066,7 @@ lock_rec_add_to_queue(
 	}
 
 	if (lock == NULL && !(type_mode & LOCK_WAIT)) {
+	    // 如果没找到正在等待这条记录上的锁 或者 当前这个锁请求不需要等待, 在这个事物上寻找一个和该行锁接近的锁,从而直接设置对应的bit,而不用创建新的锁
 
 		/* Look for a similar record lock on the same page:
 		if one is found and there are no waiting lock requests,
@@ -2051,6 +2078,10 @@ lock_rec_add_to_queue(
 		if (lock != NULL) {
 
 			lock_rec_set_nth_bit(lock, heap_no);
+
+            /* xfcomment: lock_rec_add_to_queue 插入 updete_dep_size, 如果没找到正在等待这条记录上的锁 或者
+             *  当前这个锁请求不需要等待, 在这个事物上寻找一个和该行锁接近的锁,
+             *  从而直接设置对应的bit,而不用创建新的锁. 否则不走这个分支, 通过create 调用 add_to_waitq 来更新依赖图.*/
 			update_dep_size(lock, heap_no, false);
 
 			return;
@@ -2135,6 +2166,10 @@ lock_rec_lock_fast(
 			if (!lock_rec_get_nth_bit(lock, heap_no)) {
 				lock_rec_set_nth_bit(lock, heap_no);
 				status = LOCK_REC_SUCCESS_CREATED;
+
+				/* xfcomment: lock_rec_lock_fast 插入 update_dep_size, 该函数会被 lock_rec_Lock调用, 但不会走上面的两个函数.
+				    如果该事务在记录的页上已经有锁但是没有该记录的锁,并且不设置隐式锁,则设置对应的bit即可,因系需要更新依赖图*/
+
 				update_dep_size(lock, heap_no, false);
 			}
 		}
@@ -2643,6 +2678,10 @@ lock_rec_cancel(
 	trx_mutex_exit(lock->trx);
 }
 
+
+
+// xfcomment:  lock_rec_has_to_wait_granted (wait_lock,	std::vector<lock_t *>   &granted_locks)
+//  检查wait_lock是否需要等待granted_locks中的一个,如果需要则返回导致等待的锁,否则返回空
 /*********************************************************************//**
 Checks if a waiting record lock request still has to for granted locks.
 @return	lock that is causing the wait */
@@ -2664,6 +2703,15 @@ lock_rec_has_to_wait_granted(
 	return NULL;
 }
 
+/* xfcomment: vats_grant(*lock_hash, *released_lock, heap_no) 在lock_rec_dequeue_from_page 和 lock_rec_unlock 中被调用.
+    遍历released_lock对应的记录的所有rec_lock,将需要等待的lock放入wait_locks列表,否则放入 granted_locks列表
+    使用 has_higher_priority 对 wati_locks列表中的lock进行按优先级从大到小排序.
+    遍历wait_locks列表的锁, 如果其不需要等待,则将其从HASH表中移到第一个node,并且将其放到new_granted列表
+    遍历granted_locks列表中的每个锁,如果该锁与released_lock不是来自同一个事务,则更新它的依赖图.
+        更新的值size_delta为:  - new_granted 列表中不与该lock来自同一个trx的锁的(dep_size+1)的和.
+    遍历new_granted列表中的每一个锁, 如果该锁与released_lock不是来自同一个事务,则更新它的依赖图.
+        更新的值size_delta为: + wait_locks所有处于等待并且与它来自不同trx的锁的(dep_size+1)的总和 */
+
 static
 void
 vats_grant(
@@ -2671,6 +2719,7 @@ vats_grant(
     lock_t *released_lock,
     ulint   heap_no)
 {
+    // 变量声明
 	ulint			space;
 	ulint			page_no;
 	ulint			rec_fold;
@@ -2692,19 +2741,28 @@ vats_grant(
 	space = released_lock->un_member.rec_lock.space;
 	page_no = released_lock->un_member.rec_lock.page_no;
 	rec_fold = lock_rec_fold(space, page_no);
+
+	// 遍历released_lock对应的记录的所有行锁,将需要等待的lock放入wait_locks列表,否则放入 granted_locks列表
 	for (lock = lock_rec_get_first(lock_hash, space, page_no, heap_no);
 		 lock != NULL;
 		 lock = lock_rec_get_next(heap_no, lock)) {
-		if (!lock_get_wait(lock)) {
+		if (!lock_get_wait(lock)) { // 如果不需要等就加入granted_locks 列表中,此处对于共享锁应该是直接一次性grant,是LSDF算法的实现
 			granted_locks.push_back(lock);
-		} else {
+		} else { // 将需要等待的锁放入 wait_locks列表中
 			lock->trx->seq = i++;
 			wait_locks.push_back(lock);
 		}
 	}
 
+    // 使用 has_higher_priority 对 wati_locks列表中的锁进行按优先级从大到小排序.
 	std::sort(wait_locks.begin(), wait_locks.end(), has_higher_priority);
+
+    // 遍历wait_locks列表的锁
+    // 如果其不需要等待,则将其从HASH表中移到第一个node,并且将其放到new_granted 列表中, sub_dep_size_total -= lock->trx->dep_size + 1;
+    // 如果需要等待,则只是 add_dep_size_total += lock->trx->dep_size + 1;
+
 	for (i = 0; i < wait_locks.size(); ++i) {
+
 		lock = wait_locks[i];
 		if (!lock_rec_has_to_wait_granted(lock, granted_locks)
 			&& !lock_rec_has_to_wait_granted(lock, new_granted)) {
@@ -2718,9 +2776,13 @@ vats_grant(
 			add_dep_size_total += lock->trx->dep_size + 1;
 		}
 	}
-	if (lock_get_wait(released_lock)) {
+
+	if (lock_get_wait(released_lock)) { // 这个地方没看懂,如果需要等待为什么要减去dep_size
 		sub_dep_size_total -= released_lock->trx->dep_size + 1;
 	}
+
+	// 遍历granted_locks列表中的每个锁,如果该锁与released_lock不是来自同一个事务,则更新它的依赖图.
+	// 更新的值size_delta为:  - new_granted 列表中不与该lock来自同一个trx的锁的(dep_size+1)的和.
 	for (i = 0; i < granted_locks.size(); ++i) {
 		lock = granted_locks[i];
 		dep_size_compsensate = 0;
@@ -2734,6 +2796,9 @@ vats_grant(
 			update_dep_size(lock->trx, sub_dep_size_total + dep_size_compsensate);
 		}
 	}
+
+	// 遍历new_granted列表中的每一个锁, 如果该锁与released_lock不是来自同一个事务,则更新它的依赖图.
+	// 更新的值size_delta为: + wait_locks所有处于等待并且与它来自不同trx的锁的(dep_size+1)的总和
 	for (i = 0; i < new_granted.size(); ++i) {
 		lock = new_granted[i];
 		dep_size_compsensate = 0;
@@ -2794,7 +2859,7 @@ lock_rec_dequeue_from_page(
 	MONITOR_DEC(MONITOR_NUM_RECLOCK);
 
 	if (!use_vats(in_lock->trx)) {
-
+        // FCFS 算法
 		/* Check if waiting locks in the queue can now be granted:
 		 grant locks if there are no conflicting locks ahead. Stop at
 		 the first X lock that is waiting or has been granted. */
@@ -2816,6 +2881,7 @@ lock_rec_dequeue_from_page(
 			if (!lock_rec_get_nth_bit(in_lock, heap_no)) {
 				continue;
 			}
+			// xfcomment: lock_rec_dequeue_from_page 一次性grant一个行锁
 			vats_grant(lock_hash, in_lock, heap_no);
 		}
 	}
@@ -4622,7 +4688,7 @@ released:
 			}
 		}
 	} else {
-		vats_grant(lock_sys->rec_hash, lock, heap_no);
+		vats_grant(lock_sys->rec_hash, lock, heap_no); // xfcomment: lock_rec_unlock
 	}
 
 	lock_mutex_exit();
@@ -7564,7 +7630,7 @@ DeadlockChecker::get_first_lock(ulint* heap_no) const
 	/* Must find at least two locks, otherwise there cannot be a
 	waiting lock, secondly the first lock cannot be the wait_lock. */
 	ut_a(lock != NULL);
-	ut_a(lock != m_wait_lock || use_vats(lock->trx));
+	ut_a(lock != m_wait_lock || use_vats(lock->trx)); // xfcomment: DeadlockChecker::get_first_lock(ulint* heap_no)
 
 	/* Check that the lock type doesn't change. */
 	ut_ad(lock_get_type_low(lock) == lock_get_type_low(m_wait_lock));

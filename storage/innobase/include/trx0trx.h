@@ -1000,7 +1000,7 @@ struct trx_t {
 					transactions that are committing */
 
 	/* Fields protected by the lock_sys->mutex. */
-	// xfcomment: add long trx_t.dep_size;  bool trx_t.size_updated;
+	// xfcomment: add long trx_t.dep_size;  bool trx_t.size_updated; trx_t.seq;
 	long		dep_size;	  /*!< Dependency size of this trx. */
 	bool		size_updated; /*!< Marks whether the dep size has
 					already been updated in the dep size update process. */

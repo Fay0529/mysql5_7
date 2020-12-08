@@ -1381,7 +1381,7 @@ thd_is_replication_slave_thread(
 /*============================*/
 	THD*	thd)	/*!< in: thread handle */
 {
-	return(thd && (ibool) thd_slave_thread(thd));
+	return(thd && (ibool) thd_slave_thread(thd)); //xfcomment: Handle NULL pointer in is_replication_slave.
 }
 
 /******************************************************************//**
@@ -19545,7 +19545,7 @@ static MYSQL_SYSVAR_ULONG(doublewrite_batch_size, srv_doublewrite_batch_size,
   NULL, NULL, 120, 1, 127, 0);
 #endif /* defined UNIV_DEBUG || defined UNIV_PERF_DEBUG */
 
-// xfcomment: MYSQL_SYSVAR_ENUM(lock_schedule_algorithm, innodb_lock_schedule_algorithm,
+// xfcomment: MYSQL_SYSVAR_ENUM
 static MYSQL_SYSVAR_ENUM(lock_schedule_algorithm, innodb_lock_schedule_algorithm,
   PLUGIN_VAR_RQCMDARG,
   "The algorithm Innodb uses for deciding which locks to grant next when"
