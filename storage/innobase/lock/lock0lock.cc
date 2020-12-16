@@ -52,6 +52,8 @@ Created 5/7/1996 Heikki Tuuri
 #include <algorithm>
 #include <set>
 #include <vector>
+#include <ctime>
+using std::set;
 
 /* Flag to enable/disable deadlock detector. */
 my_bool	innobase_deadlock_detect = TRUE;
@@ -1495,6 +1497,196 @@ RecLock::lock_alloc(
 	return(lock);
 }
 
+
+// xfcomment : print_dep_graph
+struct Lock_Node{
+    ulint id;
+    Lock_Node(const ulint & _id): id(_id){};
+
+    bool operator<(const struct Lock_Node & node) const{
+        return this->id < node.id;
+    }
+};
+struct Trx_Node{
+    ulint id;
+    long dep_size;
+    Trx_Node(const ulint & _id, const long & _dep_size):id(_id),dep_size(_dep_size){};
+    bool operator<(const struct Trx_Node & node) const{
+        return this->id < node.id;
+    }
+};
+
+struct Lock_Trx_Edge{
+    ulint from;
+    ulint to;
+    Lock_Trx_Edge(const ulint & _from, const ulint &_to):from(_from),to(_to){};
+    bool operator<(const struct Lock_Trx_Edge & edge) const{
+        if(this->from < edge.from) return true;
+        else if(this->from > edge.from) return false;
+        else return this->to < edge.to;
+    }
+
+};
+
+struct Trx_Lock_Edge{
+    ulint from;
+    ulint to;
+    Trx_Lock_Edge(const ulint & _from, const ulint &_to):from(_from),to(_to){};
+    bool operator<(const struct Trx_Lock_Edge & edge) const{
+        if(this->from < edge.from) return true;
+        else if(this->from > edge.from) return false;
+        else return this->to < edge.to;
+    }
+
+};
+int print_count =0;
+
+ulint lock_rec_find_next_set_bit(
+/*==================*/
+        const lock_t*	lock, /*!< in: record lock with at least one bit set */
+        int start)
+{
+    for (ulint i = start; i < lock_rec_get_n_bits(lock); ++i) {
+
+        if (lock_rec_get_nth_bit(lock, i)) {
+
+            return(i);
+        }
+    }
+
+    return(ULINT_UNDEFINED);
+}
+
+void process_lock(lock_t * lock,
+                  set<Lock_Trx_Edge> &lock_trx_edges,
+                  set<Trx_Lock_Edge>& trx_lock_edges,
+                  set<Lock_Node> &lock_nodes,
+                  set<Trx_Node> &trx_nodes,
+                  set<lock_t*> &visited){
+    // 如何处理每个lock_t元素
+    if(lock!= NULL && lock_get_type_low(lock) == LOCK_REC && !visited.count(lock)){
+        visited.insert(lock);
+        // 唯一标志一个锁
+        char buf[30];
+//        ulint space = lock->un_member.rec_lock.space;
+        ulint page_no = lock->un_member.rec_lock.page_no;
+        ulint heap_no = lock_rec_find_set_bit(lock);
+
+        // 唯一标志一个事务
+        trx_t *trx= lock->trx;
+        lock_t * wait_lock = trx->lock.wait_lock;
+        ulint trx_id  = trx_get_id_for_print(trx);
+        const ulint MAX_ID = 233;
+        trx_id = trx_id < MAX_ID ? trx_id : trx_id % MAX_ID;
+        // 一个page上可能有多个rec_lock
+        while(heap_no != ULINT_UNDEFINED){
+            sprintf(buf,"%lu%lu",page_no,heap_no);
+            ulint lock_id = strtoul(buf,NULL,0);
+            // 加入lock_nodes
+            lock_nodes.insert(Lock_Node(lock_id));
+            // 指向当前事务的边加入lock_trx_edges
+            if(wait_lock != lock){
+                // 事务持有该锁
+                lock_trx_edges.insert(Lock_Trx_Edge(lock_id,trx_id));
+            }
+            heap_no = lock_rec_find_next_set_bit(lock,heap_no+1);
+        }
+
+        Trx_Node trx_node(trx_id,trx->dep_size);
+
+        // 加入trx_nodes
+        trx_nodes.insert(trx_node);
+
+        // 事务指向等待的锁的边
+        if(wait_lock){
+            page_no = wait_lock->un_member.rec_lock.page_no;
+            heap_no = lock_rec_find_set_bit(wait_lock);
+            sprintf(buf,"%lu%lu",page_no,heap_no);
+            ulint wait_lock_id = strtoul(buf,NULL,0);
+            // 加入trx_lock_edges
+            trx_lock_edges.insert(Trx_Lock_Edge(trx_id,wait_lock_id));
+        }
+
+
+
+    }
+}
+
+void print_dep_graph(set<Lock_Trx_Edge> &lock_trx_edges, set<Trx_Lock_Edge>& trx_lock_edges,set<Lock_Node> &lock_nodes, set<Trx_Node> &trx_nodes){
+    FILE * pFile;
+
+    time_t timep;
+    struct tm *p;
+    time (&timep);
+    p=gmtime(&timep);
+    char fileName[100];
+    sprintf(fileName, "/home/xfchen/Documents/graph/%d_%d_%d_%d_%d.gv",p->tm_mon,p->tm_mday,p->tm_hour,p->tm_min,print_count++);
+    pFile = fopen(fileName,"w");
+    if(!pFile){
+        printf("打开文件 %s 失败!\n",fileName);
+        return;
+    }
+    // 打印header
+    fprintf(pFile, "digraph G {\n rankdir = \"BT\" \n graph[ ranksep=0.4, nodesep=2]\n");
+    fprintf(pFile, "node[fontsize=10]\n");
+    // 打印 trx_nodes
+    fprintf(pFile,"/**  trx_nodes */\n");
+    for(set<Trx_Node>::iterator it = trx_nodes.begin();it!=trx_nodes.end(); it++){
+        fprintf(pFile,"t%lu [ label= \"%lu\" xlabel = \"t%lu\" shape=\"square\" width=0.05]\n", it->id,it->dep_size,it->id);
+    }
+    // 打印 lock_nodes
+    fprintf(pFile,"/**  lock_nodes */\n");
+    for(set<Lock_Node>::iterator it = lock_nodes.begin();it!=lock_nodes.end();it++){
+        fprintf(pFile,"L%lu [ label= \"\" xlabel = \"L%lu\" shape=\"circle\" width=0.2]\n",it->id, it->id);
+    }
+
+    // 打印 trx_lock_edges
+    fprintf(pFile,"/**  trx_lock_edges */\n");
+    for(set<Trx_Lock_Edge>::iterator it= trx_lock_edges.begin();it!=trx_lock_edges.end();it++){
+        fprintf(pFile,"t%lu -> L%lu\n",it->from,it->to);
+    }
+
+    // 打印 lock_trx_edges
+    fprintf(pFile,"/**  lock_trx_edges */\n");
+    for(set<Lock_Trx_Edge>::iterator it= lock_trx_edges.begin(); it!=lock_trx_edges.end();it++){
+        fprintf(pFile,"L%lu -> t%lu [ style = \"dashed\" ]\n",it->from,it->to);
+    }
+    // 打印末尾
+    fprintf(pFile, "\n}");
+    fclose(pFile);
+
+}
+
+void print_dep_graph(){
+
+    set<Lock_Trx_Edge> lock_trx_edges;
+    set<Trx_Lock_Edge> trx_lock_edges;
+    set<Lock_Node> lock_nodes;
+    set<Trx_Node> trx_nodes;
+    set<lock_t*> visited;
+    // 如何遍历hash_table的每一个lock
+    for (int i = 0; i < hash_get_n_cells(lock_sys->rec_hash); i++) {
+        lock_t*	lock;
+
+        for (lock = static_cast<lock_t*>(
+                HASH_GET_FIRST(lock_sys->rec_hash, i));
+             lock != 0;
+             lock = static_cast<lock_t*>(
+                     HASH_GET_NEXT(hash, lock))) {
+            // 处理每个锁
+            process_lock(lock,lock_trx_edges,trx_lock_edges,lock_nodes,trx_nodes, visited);
+
+        }
+    }
+    // 整个图打印到文件
+
+    print_dep_graph(lock_trx_edges,trx_lock_edges,lock_nodes,trx_nodes);
+}
+
+
+
+
+
 // xfcomment : has_higher_priority(*lock1, *lock2)
 
 /*********************************************************************//**
@@ -1609,17 +1801,22 @@ update_dep_size(
 	lock_t *lock;
 	lock_t *wait_lock;
 	hash_table_t *lock_hash;
-
-	if (!use_vats(trx) || trx->size_updated || size_delta == 0) { // 递归终止条件
+	if(size_delta==0){
+        print_dep_graph();
+        return;
+	}
+	if (!use_vats(trx) || trx->size_updated) { // 递归终止条件
 		return;
 	}
 
 	trx->size_updated = true; //确保更新过的事务不会再更新
 	trx->dep_size += size_delta;
+
 	updated_trx.insert(trx);
 	if (trx->dep_size < 0) {
 		trx->dep_size = 0;
 	}
+    print_dep_graph();
 	wait_lock = trx->lock.wait_lock;
 	if (trx->state != TRX_STATE_ACTIVE // 如果当前事务不是ACTIVE  或 没有等待的锁 则直接返回
 		|| wait_lock == NULL) {
