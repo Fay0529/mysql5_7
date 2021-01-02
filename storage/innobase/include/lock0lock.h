@@ -57,7 +57,8 @@ enum innodb_lock_schedule_algorithm_t {
 };
 
 extern ulong innodb_lock_schedule_algorithm;
-
+extern ulint rollback_count;
+void dump_log();
 /*********************************************************************//**
 Gets the size of a lock struct.
 @return size in bytes */

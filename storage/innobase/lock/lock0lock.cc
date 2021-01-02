@@ -74,7 +74,25 @@ static const ulint	TABLE_LOCK_CACHE = 8;
 
 /** Size in bytes, of the table lock instance */
 static const ulint	TABLE_LOCK_SIZE = sizeof(ib_lock_t);
+ulint rollback_count=0;
+void dump_log(){
+    FILE * pFile;
 
+    time_t timep;
+    struct tm *p;
+    time (&timep);
+    p=gmtime(&timep);
+    char fileName[100];
+    sprintf(fileName, "rollback_count.txt");
+    pFile = fopen(fileName,"a");
+    if(!pFile){
+        printf("打开文件 %s 失败!\n",fileName);
+        return;
+    }
+    // 打印header
+    fprintf(pFile,"rollback_count %d-%d-%d-%d: %d\n",p->tm_mday,p->tm_hour,p->tm_min,p->tm_sec,rollback_count);
+    fclose(pFile);
+}
 /** Deadlock checker. */
 class DeadlockChecker {
 public:
@@ -1685,8 +1703,6 @@ void print_dep_graph(){
 
 
 
-
-
 // xfcomment : has_higher_priority(*lock1, *lock2)
 
 /*********************************************************************//**
@@ -1802,7 +1818,7 @@ update_dep_size(
 	lock_t *wait_lock;
 	hash_table_t *lock_hash;
 	if(size_delta==0){
-        print_dep_graph();
+//        print_dep_graph();
         return;
 	}
 	if (!use_vats(trx) || trx->size_updated) { // 递归终止条件
@@ -1816,7 +1832,7 @@ update_dep_size(
 	if (trx->dep_size < 0) {
 		trx->dep_size = 0;
 	}
-    print_dep_graph();
+//    print_dep_graph();
 	wait_lock = trx->lock.wait_lock;
 	if (trx->state != TRX_STATE_ACTIVE // 如果当前事务不是ACTIVE  或 没有等待的锁 则直接返回
 		|| wait_lock == NULL) {
@@ -8051,6 +8067,7 @@ DeadlockChecker::trx_rollback()
 	trx_mutex_exit(trx);
 }
 
+
 /** Checks if a joining lock request results in a deadlock. If a deadlock is
 found this function will resolve the deadlock by choosing a victim transaction
 and rolling it back. It will attempt to resolve all deadlocks. The returned
@@ -8106,7 +8123,6 @@ DeadlockChecker::check_and_resolve(const lock_t* lock, trx_t* trx)
 			ut_ad(trx == victim_trx);
 
 			rollback_print(victim_trx, lock);
-
 			MONITOR_INC(MONITOR_DEADLOCK);
 
 			break;
@@ -8114,7 +8130,6 @@ DeadlockChecker::check_and_resolve(const lock_t* lock, trx_t* trx)
 		} else if (victim_trx != NULL && victim_trx != trx) {
 
 			ut_ad(victim_trx == checker.m_wait_lock->trx);
-
 			checker.trx_rollback();
 
 			lock_deadlock_found = true;
