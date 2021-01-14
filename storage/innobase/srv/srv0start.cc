@@ -2662,7 +2662,7 @@ dberr_t
 innobase_shutdown_for_mysql(void)
 /*=============================*/
 {
-    dump_log();
+//    dump_log();
 	if (!srv_was_started) {
 		if (srv_is_being_started) {
 			ib::warn() << "Shutting down an improperly started,"

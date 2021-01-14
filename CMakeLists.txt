@@ -32,6 +32,7 @@ IF(CMAKE_VERSION VERSION_EQUAL "2.8.12" OR
  CMAKE_POLICY(SET CMP0022 OLD)
 ENDIF()
 add_definitions(-w)
+set(CMAKE_CXX_STANDARD 11)
 # We use the LOCATION target property (CMP0026)
 # and get_target_property() for non-existent targets (CMP0045)
 # and INSTALL_NAME_DIR (CMP0042)

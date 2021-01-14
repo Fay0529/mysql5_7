@@ -1842,7 +1842,7 @@ convert_error_code_to_mysql(
 
 		if (thd != NULL) {
 			thd_mark_transaction_to_rollback(thd, 1);
-            rollback_count++;
+//            rollback_count++;
 		}
 
 		return(HA_ERR_LOCK_DEADLOCK);
@@ -1852,7 +1852,7 @@ convert_error_code_to_mysql(
 		latest SQL statement in a lock wait timeout. Previously, we
 		rolled back the whole transaction. */
 		if (thd) {
-        rollback_count++;
+//        rollback_count++;
 			thd_mark_transaction_to_rollback(
 				thd, (int) row_rollback_on_timeout);
 		}

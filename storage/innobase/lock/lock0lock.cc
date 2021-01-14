@@ -53,8 +53,11 @@ Created 5/7/1996 Heikki Tuuri
 #include <set>
 #include <vector>
 #include <ctime>
+#include <unordered_map>
+using std::unordered_map;
 using std::set;
 
+int hash_size=2048;
 /* Flag to enable/disable deadlock detector. */
 my_bool	innobase_deadlock_detect = TRUE;
 
@@ -1515,12 +1518,108 @@ RecLock::lock_alloc(
 	return(lock);
 }
 
+// xfcomment: lrucache
+struct DLinkedNode{
+    DLinkedNode * prev;
+    DLinkedNode * next;
+    ulint key;
+    DLinkedNode(const ulint& _key):key(_key),prev(nullptr),next(nullptr){};
+    DLinkedNode():key(0),prev(nullptr),next(nullptr){};
+};
+
+
+class LRUHotNess {
+public:
+    DLinkedNode * head;
+    DLinkedNode * tail;
+    unordered_map<int,DLinkedNode*> hash_table;
+    int _capacity;
+    int _size;
+    LRUHotNess(int capacity) {
+        _capacity=capacity;
+        _size=0;
+        head = new DLinkedNode();
+        tail = new DLinkedNode();
+        head->next = tail;
+        tail->prev = head;
+    }
+
+    int get(ulint key) {
+        if(!hash_table.count(key)){
+            return 1;
+        }
+        DLinkedNode * node = hash_table[key];
+        move_to_head(node);
+        return 3;
+    }
+
+    void put(ulint key) {
+        DLinkedNode* node;
+        if(hash_table.count(key)){
+            node = hash_table[key];
+            move_to_head(node);
+        }else{
+            node = new DLinkedNode(key);
+            // insert to hash_table
+            hash_table.insert(std::pair<ulint,DLinkedNode*>(key,node));
+            // insert to list head
+            node->prev = head;
+            node->next = head->next;
+            head->next->prev = node;
+            head->next=node;
+            _size++;
+            if(_size > _capacity){
+                // delete last node
+                node = tail->prev;
+                // delete from hash_table
+                hash_table.erase(node->key);
+                // delete from list
+                tail->prev = node->prev;
+                node->prev->next = tail;
+                delete node;
+
+            }
+        }
+    }
+    void move_to_head(DLinkedNode* node){
+        node->prev->next = node->next;
+        node->next->prev = node->prev;
+        node->prev = head;
+        node->next = head->next;
+        head->next->prev = node;
+        head->next=node;
+    }
+} hot_ness(hash_size);
+
 
 // xfcomment : print_dep_graph
+struct Rec_Lock_ID{
+    ulint   space;
+    ulint   page_no;
+    ulint   heap_no;
+    Rec_Lock_ID(){};
+    Rec_Lock_ID(const ulint & _space, const ulint & _page_no, const ulint & _heap_no):space(_space),page_no(_page_no),heap_no(_heap_no){};
+    bool operator<(const Rec_Lock_ID &id)const{
+        if(this->space < id.space) return true;
+        else if(this->space > id.space) return false;
+        else if(this->page_no < id.page_no) return true;
+        else if (this->page_no>id.page_no) return false;
+        else return this->heap_no < id.heap_no;
+    }
+    bool operator>(const Rec_Lock_ID & id) const{
+        if(this->space!=id.space && this->page_no!=id.page_no && this->heap_no != id.heap_no && !(*this < id )) return true;
+        return false;
+    }
+};
+std::map<Rec_Lock_ID,ulint> m_hotness;
+ulint MAX_DEP_SIZE=1;
+ulint MAX_HOTNESS=1;
 struct Lock_Node{
-    ulint id;
-    Lock_Node(const ulint & _id): id(_id){};
-
+    Rec_Lock_ID id;
+    ulint hotness;
+    explicit Lock_Node(const Rec_Lock_ID & _id): id(_id),hotness(){
+        hotness = m_hotness.count(_id)? m_hotness[_id]:0;
+    };
     bool operator<(const struct Lock_Node & node) const{
         return this->id < node.id;
     }
@@ -1535,9 +1634,10 @@ struct Trx_Node{
 };
 
 struct Lock_Trx_Edge{
-    ulint from;
+    Rec_Lock_ID from;
     ulint to;
-    Lock_Trx_Edge(const ulint & _from, const ulint &_to):from(_from),to(_to){};
+    lock_mode mode;
+    Lock_Trx_Edge(const Rec_Lock_ID & _from, const ulint &_to,lock_mode _mode):from(_from),to(_to),mode(_mode){};
     bool operator<(const struct Lock_Trx_Edge & edge) const{
         if(this->from < edge.from) return true;
         else if(this->from > edge.from) return false;
@@ -1548,8 +1648,9 @@ struct Lock_Trx_Edge{
 
 struct Trx_Lock_Edge{
     ulint from;
-    ulint to;
-    Trx_Lock_Edge(const ulint & _from, const ulint &_to):from(_from),to(_to){};
+    Rec_Lock_ID to;
+    lock_mode mode;
+    Trx_Lock_Edge(const ulint & _from, const Rec_Lock_ID &_to, lock_mode _mode):from(_from),to(_to),mode(_mode){};
     bool operator<(const struct Trx_Lock_Edge & edge) const{
         if(this->from < edge.from) return true;
         else if(this->from > edge.from) return false;
@@ -1562,7 +1663,7 @@ int print_count =0;
 ulint lock_rec_find_next_set_bit(
 /*==================*/
         const lock_t*	lock, /*!< in: record lock with at least one bit set */
-        int start)
+        ulint start)
 {
     for (ulint i = start; i < lock_rec_get_n_bits(lock); ++i) {
 
@@ -1586,10 +1687,10 @@ void process_lock(lock_t * lock,
         visited.insert(lock);
         // 唯一标志一个锁
         char buf[30];
-//        ulint space = lock->un_member.rec_lock.space;
-        ulint page_no = lock->un_member.rec_lock.page_no;
-        ulint heap_no = lock_rec_find_set_bit(lock);
-
+        Rec_Lock_ID lock_id;
+        lock_id.space = lock->un_member.rec_lock.space;
+        lock_id.page_no = lock->un_member.rec_lock.page_no;
+        lock_id.heap_no = lock_rec_find_set_bit(lock);
         // 唯一标志一个事务
         trx_t *trx= lock->trx;
         lock_t * wait_lock = trx->lock.wait_lock;
@@ -1597,17 +1698,15 @@ void process_lock(lock_t * lock,
         const ulint MAX_ID = 233;
         trx_id = trx_id < MAX_ID ? trx_id : trx_id % MAX_ID;
         // 一个page上可能有多个rec_lock
-        while(heap_no != ULINT_UNDEFINED){
-            sprintf(buf,"%lu%lu",page_no,heap_no);
-            ulint lock_id = strtoul(buf,NULL,0);
+        while(lock_id.heap_no != ULINT_UNDEFINED){
             // 加入lock_nodes
             lock_nodes.insert(Lock_Node(lock_id));
             // 指向当前事务的边加入lock_trx_edges
             if(wait_lock != lock){
                 // 事务持有该锁
-                lock_trx_edges.insert(Lock_Trx_Edge(lock_id,trx_id));
+                lock_trx_edges.insert(Lock_Trx_Edge(lock_id,trx_id,lock->mode()));
             }
-            heap_no = lock_rec_find_next_set_bit(lock,heap_no+1);
+            lock_id.heap_no = lock_rec_find_next_set_bit(lock,lock_id.heap_no+1);
         }
 
         Trx_Node trx_node(trx_id,trx->dep_size);
@@ -1617,12 +1716,11 @@ void process_lock(lock_t * lock,
 
         // 事务指向等待的锁的边
         if(wait_lock){
-            page_no = wait_lock->un_member.rec_lock.page_no;
-            heap_no = lock_rec_find_set_bit(wait_lock);
-            sprintf(buf,"%lu%lu",page_no,heap_no);
-            ulint wait_lock_id = strtoul(buf,NULL,0);
+            lock_id.space = wait_lock->un_member.rec_lock.space;
+            lock_id.page_no = wait_lock->un_member.rec_lock.page_no;
+            lock_id.heap_no = lock_rec_find_set_bit(wait_lock);
             // 加入trx_lock_edges
-            trx_lock_edges.insert(Trx_Lock_Edge(trx_id,wait_lock_id));
+            trx_lock_edges.insert(Trx_Lock_Edge(trx_id,lock_id,wait_lock->mode()));
         }
 
 
@@ -1645,29 +1743,35 @@ void print_dep_graph(set<Lock_Trx_Edge> &lock_trx_edges, set<Trx_Lock_Edge>& trx
         return;
     }
     // 打印header
-    fprintf(pFile, "digraph G {\n rankdir = \"BT\" \n graph[ ranksep=0.4, nodesep=2]\n");
-    fprintf(pFile, "node[fontsize=10]\n");
+    fprintf(pFile, "digraph G {\n rankdir = \"BT\" \n graph[ ranksep=0.2, nodesep=0.6]\n");
+    fprintf(pFile, "node[fontsize=10 fixedsize = shape]\n ");
     // 打印 trx_nodes
     fprintf(pFile,"/**  trx_nodes */\n");
     for(set<Trx_Node>::iterator it = trx_nodes.begin();it!=trx_nodes.end(); it++){
-        fprintf(pFile,"t%lu [ label= \"%lu\" xlabel = \"t%lu\" shape=\"square\" width=0.05]\n", it->id,it->dep_size,it->id);
+        fprintf(pFile,"t%lu [ label= \"%lu\" xlabel = \"t%lu\" shape=\"square\" width=0.3]\n", it->id,it->dep_size,it->id);
     }
     // 打印 lock_nodes
     fprintf(pFile,"/**  lock_nodes */\n");
     for(set<Lock_Node>::iterator it = lock_nodes.begin();it!=lock_nodes.end();it++){
-        fprintf(pFile,"L%lu [ label= \"\" xlabel = \"L%lu\" shape=\"circle\" width=0.2]\n",it->id, it->id);
+        fprintf(pFile,"L%d_%d_%d [ label= \"%d\" xlabel = \"L%d_%d_%d\" shape=\"circle\" width=0.2]\n",
+                it->id.space, it->id.page_no,it->id.heap_no, it->hotness,it->id.space, it->id.page_no,it->id.heap_no);
     }
 
     // 打印 trx_lock_edges
     fprintf(pFile,"/**  trx_lock_edges */\n");
     for(set<Trx_Lock_Edge>::iterator it= trx_lock_edges.begin();it!=trx_lock_edges.end();it++){
-        fprintf(pFile,"t%lu -> L%lu\n",it->from,it->to);
+        char mode='S';
+        if(it->mode == LOCK_X) mode = 'X';
+        fprintf(pFile,"t%lu -> L%d_%d_%d  [label=\"%c\"]\n",it->from,it->to.space,it->to.page_no,it->to.heap_no,mode);
     }
 
     // 打印 lock_trx_edges
     fprintf(pFile,"/**  lock_trx_edges */\n");
     for(set<Lock_Trx_Edge>::iterator it= lock_trx_edges.begin(); it!=lock_trx_edges.end();it++){
-        fprintf(pFile,"L%lu -> t%lu [ style = \"dashed\" ]\n",it->from,it->to);
+        char mode='S';
+        if(it->mode == LOCK_X) mode = 'X';
+        fprintf(pFile,"L%d_%d_%d -> t%lu [ label=\"%c\" style = \"dashed\" ]\n",
+                it->from.space, it->from.page_no,it->from.heap_no,it->to,mode);
     }
     // 打印末尾
     fprintf(pFile, "\n}");
@@ -1700,6 +1804,7 @@ void print_dep_graph(){
 
     print_dep_graph(lock_trx_edges,trx_lock_edges,lock_nodes,trx_nodes);
 }
+
 
 
 
@@ -1880,6 +1985,7 @@ update_dep_size(
     然后使用上面的函数递归更新该锁对应的事务以及其等待的事务的dep_size+=total_size_delta */
 
 
+
 static
 void
 update_dep_size(
@@ -1927,6 +2033,11 @@ update_dep_size(
 	}
 }
 
+static void update_dep_size_by_lru(lock_t *in_lock){
+    unordered_map<int,int> hash_table;
+}
+
+
 // xfcomment: 修改 RecLock::lock_add(lock_t* lock, bool add_to_hash), 该函数只会在锁创建的时候调用
 
 /**
@@ -1938,10 +2049,9 @@ RecLock::lock_add(lock_t* lock, bool add_to_hash)
 {
 	ut_ad(lock_mutex_own());
 	ut_ad(trx_mutex_own(lock->trx));
-
+    ulint	key = m_rec_id.fold();
 	bool wait = m_mode & LOCK_WAIT; // xfcomment: RecLock::lock_add
 	if (add_to_hash) {
-		ulint	key = m_rec_id.fold();
 		hash_table_t *lock_hash = lock_hash_get(m_mode); // xfcomment: RecLock::lock_add
 
 		++lock->index->table->n_rec_locks;
@@ -1956,14 +2066,15 @@ RecLock::lock_add(lock_t* lock, bool add_to_hash)
 
        // xfcomment: - if (m_mode & LOCK_WAIT) {
 	UT_LIST_ADD_LAST(lock->trx->lock.trx_locks, lock); // 将锁加入到trx的trx_locks链表里
+	ulint mykey = lock_rec_fold(key,m_rec_id.m_heap_no);
+    lock->trx->dep_size+=hot_ness.get(mykey);
+    hot_ness.put(mykey);
 
 	if (wait) {
 	    // 如果该锁需要等待,则设置这个锁的状态为等待,并且将这个事务的wait_lock指向该锁
 		lock_set_lock_and_trx_wait(lock, lock->trx);
-	} else {
-	    // 如果该锁不需要等待,则说明锁对应的事务持有该锁,则调用上面的函数更新该锁
-		update_dep_size(lock, lock_rec_find_set_bit(lock), false);
 	}
+//    print_dep_graph();
 	// xfcomment: - UT_LIST_ADD_LAST(lock->trx->lock.trx_locks, lock);
 }
 
@@ -2188,7 +2299,7 @@ RecLock::add_to_waitq(const lock_t* wait_for, const lock_prdt_t* prdt)
 	ut_ad(trx_mutex_own(m_trx));
 
     // xfcomment : update_dep_size 加入 RecLock::add_to_waitq 这个函数目前还没理解 会在lock_rec_insert_check_and_lock 和 lock_rec_lock_slow中调用
-	update_dep_size(lock, lock_rec_find_set_bit(lock), err == DB_LOCK_WAIT || err == DB_DEADLOCK);
+//	update_dep_size(lock, lock_rec_find_set_bit(lock), err == DB_LOCK_WAIT || err == DB_DEADLOCK);
 
 	/* m_trx->mysql_thd is NULL if it's an internal trx. So current_thd is used */
 	if (err == DB_LOCK_WAIT) {
@@ -2295,7 +2406,7 @@ lock_rec_add_to_queue(
             /* xfcomment: lock_rec_add_to_queue 插入 updete_dep_size, 如果没找到正在等待这条记录上的锁 或者
              *  当前这个锁请求不需要等待, 在这个事物上寻找一个和该行锁接近的锁,
              *  从而直接设置对应的bit,而不用创建新的锁. 否则不走这个分支, 通过create 调用 add_to_waitq 来更新依赖图.*/
-			update_dep_size(lock, heap_no, false);
+//			update_dep_size(lock, heap_no, false);
 
 			return;
 		}
@@ -2383,7 +2494,7 @@ lock_rec_lock_fast(
 				/* xfcomment: lock_rec_lock_fast 插入 update_dep_size, 该函数会被 lock_rec_Lock调用, 但不会走上面的两个函数.
 				    如果该事务在记录的页上已经有锁但是没有该记录的锁,并且不设置隐式锁,则设置对应的bit即可,因系需要更新依赖图*/
 
-				update_dep_size(lock, heap_no, false);
+//				update_dep_size(lock, heap_no, false);
 			}
 		}
 
@@ -2938,19 +3049,14 @@ vats_grant(
 	ulint			rec_fold;
 	ulint     i;
 	ulint     j;
-	long      sub_dep_size_total;
-	long      add_dep_size_total;
-	long      dep_size_compsensate;
 	lock_t*		lock;
 	lock_t*		wait_lock;
 	lock_t*		new_granted_lock;
 	std::vector<lock_t *> wait_locks;
 	std::vector<lock_t *> granted_locks;
-	std::vector<lock_t *> new_granted;
+    std::vector<lock_t *> new_granted;
 
 	i = 0;
-	sub_dep_size_total = 0;
-	add_dep_size_total = 0;
 	space = released_lock->un_member.rec_lock.space;
 	page_no = released_lock->un_member.rec_lock.page_no;
 	rec_fold = lock_rec_fold(space, page_no);
@@ -2977,54 +3083,13 @@ vats_grant(
 	for (i = 0; i < wait_locks.size(); ++i) {
 
 		lock = wait_locks[i];
-		if (!lock_rec_has_to_wait_granted(lock, granted_locks)
-			&& !lock_rec_has_to_wait_granted(lock, new_granted)) {
-			lock_grant(lock);
-			HASH_DELETE(lock_t, hash, lock_hash,
-						rec_fold, lock);
-			lock_rec_insert_to_head(lock_hash, lock, rec_fold);
-			new_granted.push_back(lock);
-			sub_dep_size_total -= lock->trx->dep_size + 1;
-		} else {
-			add_dep_size_total += lock->trx->dep_size + 1;
-		}
-	}
-
-	if (lock_get_wait(released_lock)) { // 这个地方没看懂,如果需要等待为什么要减去dep_size
-		sub_dep_size_total -= released_lock->trx->dep_size + 1;
-	}
-
-	// 遍历granted_locks列表中的每个锁,如果该锁与released_lock不是来自同一个事务,则更新它的依赖图.
-	// 更新的值size_delta为:  - new_granted 列表中不与该lock来自同一个trx的锁的(dep_size+1)的和.
-	for (i = 0; i < granted_locks.size(); ++i) {
-		lock = granted_locks[i];
-		dep_size_compsensate = 0;
-		for (j = 0; j < new_granted.size(); ++j) {
-			new_granted_lock = new_granted[j];
-			if (lock->trx == new_granted_lock->trx) {
-				dep_size_compsensate += lock->trx->dep_size + 1;
-			}
-		}
-		if (lock->trx != released_lock->trx) {
-			update_dep_size(lock->trx, sub_dep_size_total + dep_size_compsensate);
-		}
-	}
-
-	// 遍历new_granted列表中的每一个锁, 如果该锁与released_lock不是来自同一个事务,则更新它的依赖图.
-	// 更新的值size_delta为: + wait_locks所有处于等待并且与它来自不同trx的锁的(dep_size+1)的总和
-	for (i = 0; i < new_granted.size(); ++i) {
-		lock = new_granted[i];
-		dep_size_compsensate = 0;
-		for (j = 0; j < wait_locks.size(); ++j) {
-			wait_lock = wait_locks[j];
-			if (lock_get_wait(wait_lock)
-				&& lock->trx == wait_lock->trx) {
-				dep_size_compsensate -= lock->trx->dep_size + 1;
-			}
-		}
-		if (lock->trx != released_lock->trx) {
-			update_dep_size(lock->trx, add_dep_size_total + dep_size_compsensate);
-		}
+		if (!lock_rec_has_to_wait_granted(lock, granted_locks) && !lock_rec_has_to_wait_granted(lock, new_granted)) {
+            lock_grant(lock);
+            HASH_DELETE(lock_t, hash, lock_hash,
+                        rec_fold, lock);
+            lock_rec_insert_to_head(lock_hash, lock, rec_fold);
+            new_granted.push_back(lock);
+        }
 	}
 }
 
